@@ -1,0 +1,6 @@
+{
+  "name": "存货集市 · 私物出清与选购推送系统",
+  "description": "个人存货与闲置商品出清展示平台，支持店主快捷发布编辑商品图片与价格描述，买家勾选心仪物品并一键推送邮件订购意向至店主与后台管理系统。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
