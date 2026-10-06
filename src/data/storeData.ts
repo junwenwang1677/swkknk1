@@ -17,8 +17,7 @@ export const INITIAL_SETTINGS: StoreSettings = {
     "user": "",
     "pass": "",
     "fromName": "存货集市订单系统"
-  },
-  "adminPassword": "admin888"
+  }
 };
 
 export const INITIAL_ITEMS: InventoryItem[] = [];

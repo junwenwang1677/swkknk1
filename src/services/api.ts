@@ -98,12 +98,19 @@ export const api = {
 
   // Orders
   async getOrders(): Promise<OrderItem[]> {
+    if (!this.hasAdminSession()) {
+      return [];
+    }
     try {
-      const res = await fetch('/api/orders');
+      const res = await fetch('/api/orders', {
+        headers: getAdminHeaders(),
+      });
       if (res.ok) {
         const data = await res.json();
-        localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(data));
-        return data;
+        if (Array.isArray(data)) {
+          localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(data));
+          return data;
+        }
       }
     } catch {}
     const local = localStorage.getItem(STORAGE_KEYS.ORDERS);
@@ -116,16 +123,20 @@ export const api = {
   },
 
   async createOrder(orderData: Partial<OrderItem> & { autoReserve?: boolean }): Promise<{ success: boolean; order: OrderItem; message: string }> {
-    try {
-      const res = await fetch('/api/orders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(orderData),
-      });
-      if (res.ok) {
-        return await res.json();
-      }
-    } catch {}
+    const res = await fetch('/api/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(orderData),
+    });
+
+    if (res.ok) {
+      return await res.json();
+    }
+
+    if (res.status === 409) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || '选购的商品库存不足或刚刚已被其他买家预订，请刷新页面查看最新货品');
+    }
 
     const orderId = `ORD-${Date.now().toString().slice(-6)}`;
     const newOrder: OrderItem = {
@@ -143,14 +154,11 @@ export const api = {
       sellerEmail: orderData.sellerEmail || 'shiwokakanaka@gmail.com',
       emailPushed: true,
     };
-    const orders = await this.getOrders();
-    orders.unshift(newOrder);
-    localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify(orders));
 
     return {
       success: true,
       order: newOrder,
-      message: `意向清单已提交至后台，并通知店主邮箱: ${newOrder.sellerEmail}`,
+      message: `意向清单已生成，请通过邮件或微信联系店主`,
     };
   },
 

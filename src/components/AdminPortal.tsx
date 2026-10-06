@@ -89,7 +89,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const [storeName, setStoreName] = useState(settings.storeName);
   const [announcement, setAnnouncement] = useState(settings.announcement);
   const [currencySymbol, setCurrencySymbol] = useState(settings.currency);
-  const [adminPassword, setAdminPassword] = useState(settings.adminPassword || 'admin888');
+  const [adminPassword, setAdminPassword] = useState(settings.adminPassword || '');
   const [pickupLocation, setPickupLocation] = useState(settings.pickupLocation || '自提或在学校领取');
   const [contactWeChat, setContactWeChat] = useState(settings.contactWeChat || '月月鸟 (美国)');
   const [contactWeChatName, setContactWeChatName] = useState(settings.contactWeChatName || '月月鸟');
@@ -306,7 +306,7 @@ export const INITIAL_ITEMS: InventoryItem[] = ${JSON.stringify(items, null, 2)};
       storeName: storeName.trim(),
       announcement: announcement.trim(),
       currency: currencySymbol.trim(),
-      adminPassword: adminPassword.trim() || 'admin888',
+      ...(adminPassword.trim() ? { adminPassword: adminPassword.trim() } : {}),
       pickupLocation: pickupLocation.trim(),
       contactWeChat: contactWeChat.trim(),
       contactWeChatName: contactWeChatName.trim(),
@@ -1240,7 +1240,7 @@ export const INITIAL_ITEMS: InventoryItem[] = ${JSON.stringify(items, null, 2)};
                     type="text"
                     value={adminPassword}
                     onChange={(e) => setAdminPassword(e.target.value)}
-                    placeholder="请输入店主后台访问密码 (初始默认: admin888)"
+                    placeholder="若修改管理密码请输入新密码，不修改请留空"
                     className="w-full text-xs px-3.5 py-2.5 border border-stone-200 rounded-lg focus:outline-hidden focus:border-stone-900 font-mono bg-stone-50/50"
                   />
                   <p className="text-[11px] text-stone-400 mt-1">

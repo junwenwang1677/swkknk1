@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Search,
   HelpCircle,
@@ -14,7 +14,7 @@ import {
 import { InventoryItem, SelectedCartItem, OrderItem, StoreSettings } from './types';
 import { api } from './services/api';
 import { CATEGORIES } from './utils/imagePresets';
-import { TopBar } from './components/TopBar';
+import { TopBar, getCategoryIcon } from './components/TopBar';
 import { ItemCard } from './components/ItemCard';
 import { ItemDetailModal } from './components/ItemDetailModal';
 import { CheckoutDrawer } from './components/CheckoutDrawer';
@@ -51,6 +51,19 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [onlyAvailable, setOnlyAvailable] = useState(false);
   const [mobileLayout, setMobileLayout] = useState<'double' | 'single'>('double');
+
+  // Compute item counts for all categories
+  const categoryCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    CATEGORIES.forEach((cat) => {
+      if (cat === '全部存货') {
+        counts[cat] = items.length;
+      } else {
+        counts[cat] = items.filter((i) => i.category === cat).length;
+      }
+    });
+    return counts;
+  }, [items]);
 
   // Visitor User Email (Persistent 365 days without password via Cookie + localStorage)
   const [visitorEmail, setVisitorEmail] = useState<string>(() => {
@@ -91,6 +104,16 @@ export default function App() {
     localStorage.setItem('visitor_saved_cart', JSON.stringify(cart));
   }, [cart]);
 
+  // Prompt email modal on first arrival ONLY if no email is remembered AND not dismissed
+  useEffect(() => {
+    if (!visitorEmail && !hasUserDismissedEmailPrompt()) {
+      const timer = setTimeout(() => {
+        setIsEmailModalOpen(true);
+      }, 700);
+      return () => clearTimeout(timer);
+    }
+  }, [visitorEmail]);
+
   // Detail Modal
   const [detailItem, setDetailItem] = useState<InventoryItem | null>(null);
 
@@ -115,7 +138,10 @@ export default function App() {
       if (api.hasAdminSession()) {
         const valid = await api.checkAdminSession();
         setIsAuthenticated(valid);
-        if (!valid) {
+        if (valid) {
+          const fetchedOrders = await api.getOrders().catch(() => []);
+          setOrders(fetchedOrders);
+        } else {
           api.adminLogout();
         }
       }
@@ -126,13 +152,11 @@ export default function App() {
   const loadAllData = async () => {
     setIsLoading(true);
     try {
-      const [fetchedItems, fetchedOrders, fetchedSettings] = await Promise.all([
+      const [fetchedItems, fetchedSettings] = await Promise.all([
         api.getItems(),
-        api.getOrders(),
         api.getSettings(),
       ]);
       setItems(fetchedItems);
-      setOrders(fetchedOrders);
       setSettings(fetchedSettings);
     } catch (err) {
       console.error('Failed to load data:', err);
@@ -210,17 +234,21 @@ export default function App() {
 
       if (result.success) {
         showToast('选购清单邮件已准备就绪！');
-        // Refresh orders and items
-        const [updatedOrders, updatedItems] = await Promise.all([
-          api.getOrders(),
-          api.getItems(),
-        ]);
-        setOrders(updatedOrders);
+        // Refresh inventory to reflect updated stock immediately
+        const updatedItems = await api.getItems();
         setItems(updatedItems);
+        if (isAuthenticated) {
+          const updatedOrders = await api.getOrders().catch(() => []);
+          setOrders(updatedOrders);
+        }
         return result.order;
       }
       return null;
-    } catch (err) {
+    } catch (err: any) {
+      showToast(err.message || '选购提交失败，请刷新重试');
+      // Refresh items to display up-to-date availability
+      const updatedItems = await api.getItems().catch(() => []);
+      if (updatedItems.length > 0) setItems(updatedItems);
       return null;
     }
   };
@@ -315,9 +343,13 @@ export default function App() {
     }
   };
 
-  const handleAdminAuthSuccess = () => {
+  const handleAdminAuthSuccess = async () => {
     setIsAuthenticated(true);
     setIsAdminView(true);
+    try {
+      const fetchedOrders = await api.getOrders();
+      setOrders(fetchedOrders);
+    } catch {}
     showToast('店主管理身份验证成功，已进入后台');
   };
 
@@ -369,6 +401,10 @@ export default function App() {
         isAdmin={isAdminView}
         isAuthenticated={isAuthenticated}
         visitorEmail={visitorEmail}
+        selectedCategory={selectedCategory}
+        categories={CATEGORIES}
+        categoryCounts={categoryCounts}
+        totalItemsCount={items.length}
         onOpenEmailModal={() => setIsEmailModalOpen(true)}
         onOpenCart={() => setIsCartOpen(true)}
         onOpenWeChatModal={() => setIsWeChatModalOpen(true)}
@@ -385,7 +421,7 @@ export default function App() {
 
       {/* Main Viewport */}
       <main className="flex-1">
-        {isAdminView ? (
+        {isAdminView && isAuthenticated ? (
           /* Admin Management Mode */
           <AdminPortal
             items={items}
@@ -479,24 +515,34 @@ export default function App() {
 
             {/* Filter & Search Bar */}
             <div className="space-y-3">
-              {/* Category Segmented Controls - Enlarged mobile tap targets */}
-              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 p-1 bg-stone-200/50 rounded-xl max-w-full">
+              {/* Category Segmented Controls - Fluid horizontal pill track */}
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-1.5 p-1 bg-stone-200/50 rounded-2xl max-w-full scrollbar-none scroll-smooth">
                 {CATEGORIES.map((cat) => {
-                  const count =
-                    cat === '全部存货'
-                      ? items.length
-                      : items.filter((i) => i.category === cat).length;
+                  const count = categoryCounts[cat] ?? 0;
+                  const isSelected = selectedCategory === cat;
                   return (
                     <button
                       key={cat}
                       onClick={() => setSelectedCategory(cat)}
-                      className={`px-3.5 py-2 sm:py-1.5 text-xs font-semibold rounded-lg whitespace-nowrap min-h-[36px] sm:min-h-0 flex items-center transition-all cursor-pointer ${
-                        selectedCategory === cat
-                          ? 'bg-white text-stone-900 shadow-xs'
-                          : 'text-stone-600 hover:text-stone-900'
+                      className={`px-3.5 py-2 text-xs font-medium rounded-xl whitespace-nowrap min-h-[38px] sm:min-h-0 flex items-center gap-1.5 transition-all duration-200 cursor-pointer active:scale-95 ${
+                        isSelected
+                          ? 'bg-white text-stone-900 shadow-xs font-semibold'
+                          : 'text-stone-600 hover:text-stone-900 hover:bg-white/60'
                       }`}
                     >
-                      {cat} ({count})
+                      <span className={isSelected ? 'text-amber-600' : 'text-stone-400'}>
+                        {getCategoryIcon(cat)}
+                      </span>
+                      <span>{cat}</span>
+                      <span
+                        className={`text-[10px] font-mono px-1.5 py-0.2 rounded-full leading-tight transition-colors ${
+                          isSelected
+                            ? 'bg-amber-100 text-amber-900 font-bold'
+                            : 'bg-stone-300/60 text-stone-500'
+                        }`}
+                      >
+                        {count}
+                      </span>
                     </button>
                   );
                 })}

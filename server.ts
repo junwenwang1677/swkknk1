@@ -27,6 +27,45 @@ function saveAdminTokens(tokens: Set<string>): void {
   writeJsonFile(TOKENS_FILE, Array.from(tokens));
 }
 
+// In-memory rate limiting for login attempts
+interface LoginAttemptRecord {
+  count: number;
+  lastAttempt: number;
+  lockedUntil: number;
+}
+const loginAttempts = new Map<string, LoginAttemptRecord>();
+
+function checkLoginRateLimit(ip: string): { allowed: boolean; waitMinutes?: number } {
+  const record = loginAttempts.get(ip);
+  if (!record) return { allowed: true };
+  const now = Date.now();
+  if (record.lockedUntil > now) {
+    const waitMinutes = Math.ceil((record.lockedUntil - now) / (60 * 1000));
+    return { allowed: false, waitMinutes };
+  }
+  // Reset if last attempt was more than 15 minutes ago
+  if (now - record.lastAttempt > 15 * 60 * 1000) {
+    loginAttempts.delete(ip);
+    return { allowed: true };
+  }
+  return { allowed: true };
+}
+
+function recordLoginFailure(ip: string): void {
+  const now = Date.now();
+  const record = loginAttempts.get(ip) || { count: 0, lastAttempt: now, lockedUntil: 0 };
+  record.count += 1;
+  record.lastAttempt = now;
+  if (record.count >= 5) {
+    record.lockedUntil = now + 15 * 60 * 1000; // Lock for 15 minutes after 5 consecutive failures
+  }
+  loginAttempts.set(ip, record);
+}
+
+function recordLoginSuccess(ip: string): void {
+  loginAttempts.delete(ip);
+}
+
 // Default initial items (Clean empty state)
 const DEFAULT_ITEMS: any[] = [];
 
@@ -54,9 +93,15 @@ const DEFAULT_SETTINGS = {
 
 function syncToSourceCode(items: any[], settings: any) {
   try {
+    const safeSettings = { ...settings };
+    delete safeSettings.adminPassword;
+    if (safeSettings.smtpConfig) {
+      safeSettings.smtpConfig = { ...safeSettings.smtpConfig, pass: '' };
+    }
+
     const tsContent = `import { InventoryItem, StoreSettings } from '../types';
 
-export const INITIAL_SETTINGS: StoreSettings = ${JSON.stringify(settings, null, 2)};
+export const INITIAL_SETTINGS: StoreSettings = ${JSON.stringify(safeSettings, null, 2)};
 
 export const INITIAL_ITEMS: InventoryItem[] = ${JSON.stringify(items, null, 2)};
 `;
@@ -201,7 +246,8 @@ async function startServer() {
 
   // API Endpoints
   const OWNER_EMAIL = 'shiwokakanaka@gmail.com';
-  const requireOwnerAuth = (req: Request, res: Response, next: () => void) => {
+
+  const isOwnerAuthenticated = (req: Request): boolean => {
     const adminToken = (req.headers['x-admin-token'] as string || '').trim();
     const rawCookies = req.headers.cookie || '';
     let cookieToken = '';
@@ -213,7 +259,11 @@ async function startServer() {
     });
 
     const activeTokens = loadAdminTokens();
-    if ((adminToken && activeTokens.has(adminToken)) || (cookieToken && activeTokens.has(cookieToken))) {
+    return !!((adminToken && activeTokens.has(adminToken)) || (cookieToken && activeTokens.has(cookieToken)));
+  };
+
+  const requireOwnerAuth = (req: Request, res: Response, next: () => void) => {
+    if (isOwnerAuthenticated(req)) {
       return next();
     }
 
@@ -225,22 +275,19 @@ async function startServer() {
 
   // Admin Auth APIs
   app.get('/api/admin/check-session', (req: Request, res: Response) => {
-    const adminToken = (req.headers['x-admin-token'] as string || '').trim();
-    const rawCookies = req.headers.cookie || '';
-    let cookieToken = '';
-    rawCookies.split(';').forEach((c) => {
-      const parts = c.split('=');
-      const k = parts[0]?.trim();
-      const v = parts.slice(1).join('=').trim();
-      if (k === 'admin_session_token') cookieToken = decodeURIComponent(v).trim();
-    });
-
-    const activeTokens = loadAdminTokens();
-    const isValid = (adminToken && activeTokens.has(adminToken)) || (cookieToken && activeTokens.has(cookieToken));
-    res.json({ authenticated: !!isValid });
+    res.json({ authenticated: isOwnerAuthenticated(req) });
   });
 
-  app.post('/api/admin/login', (req: Request, res: Response) => {
+  app.post('/api/admin/login', async (req: Request, res: Response) => {
+    const clientIp = (req.headers['x-forwarded-for'] as string || req.ip || 'unknown').split(',')[0].trim();
+    const rateLimit = checkLoginRateLimit(clientIp);
+    if (!rateLimit.allowed) {
+      return res.status(429).json({
+        success: false,
+        error: `连续输错密码次数过多，账号已临时锁定以防暴力破解，请 ${rateLimit.waitMinutes} 分钟后再试`
+      });
+    }
+
     const { email, password } = req.body || {};
     const settings = readJsonFile<any>(SETTINGS_FILE, DEFAULT_SETTINGS);
     const expectedEmail = (settings.sellerEmail || OWNER_EMAIL).toLowerCase().trim();
@@ -252,6 +299,7 @@ async function startServer() {
       password &&
       password === expectedPassword
     ) {
+      recordLoginSuccess(clientIp);
       const token = `adm_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
       const activeTokens = loadAdminTokens();
       activeTokens.add(token);
@@ -266,6 +314,10 @@ async function startServer() {
         message: '登录成功'
       });
     }
+
+    recordLoginFailure(clientIp);
+    // Artificial 400ms delay to thwart automated fast brute-forcing
+    await new Promise((r) => setTimeout(r, 400));
 
     return res.status(401).json({
       success: false,
@@ -370,8 +422,8 @@ async function startServer() {
     res.json({ success: true, id });
   });
 
-  // 2. Orders / Inquiries API
-  app.get('/api/orders', (req: Request, res: Response) => {
+  // 2. Orders / Inquiries API (Strictly protected by owner authentication for privacy)
+  app.get('/api/orders', requireOwnerAuth, (req: Request, res: Response) => {
     const orders = readJsonFile<any[]>(ORDERS_FILE, []);
     res.json(orders);
   });
@@ -380,6 +432,51 @@ async function startServer() {
     const orders = readJsonFile<any[]>(ORDERS_FILE, []);
     const items = readJsonFile<any[]>(ITEMS_FILE, DEFAULT_ITEMS);
     const settings = readJsonFile<any>(SETTINGS_FILE, DEFAULT_SETTINGS);
+
+    const orderItems = Array.isArray(req.body.items) ? req.body.items : [];
+    if (orderItems.length === 0) {
+      return res.status(400).json({ success: false, error: '订单物品清单不能为空' });
+    }
+
+    // 1. Concurrency & Stock Check - Prevent overselling on single/limited inventory
+    for (const reqItem of orderItems) {
+      const found = items.find((i: any) => i.id === reqItem.id);
+      if (!found) {
+        return res.status(409).json({
+          success: false,
+          error: `您选购的商品「${reqItem.title || '部分物品'}」已下架，请刷新页面查看最新货品`
+        });
+      }
+      if (found.status === 'sold' || (found.stock !== undefined && Number(found.stock) <= 0)) {
+        return res.status(409).json({
+          success: false,
+          error: `手慢了！商品「${found.title}」刚刚已被其他买家成功预订，目前已无存货`
+        });
+      }
+      const requestedQty = Number(reqItem.quantity) || 1;
+      if (found.stock !== undefined && Number(found.stock) < requestedQty) {
+        return res.status(409).json({
+          success: false,
+          error: `商品「${found.title}」剩余库存仅剩 ${found.stock} 件，无法订购 ${requestedQty} 件`
+        });
+      }
+    }
+
+    // 2. Atomic Stock Deduction
+    for (const reqItem of orderItems) {
+      const foundIndex = items.findIndex((i: any) => i.id === reqItem.id);
+      if (foundIndex !== -1) {
+        const requestedQty = Number(reqItem.quantity) || 1;
+        const currentStock = items[foundIndex].stock !== undefined ? Number(items[foundIndex].stock) : 1;
+        const remaining = Math.max(0, currentStock - requestedQty);
+        items[foundIndex].stock = remaining;
+        if (remaining <= 0) {
+          items[foundIndex].status = 'sold';
+        }
+      }
+    }
+    writeJsonFile(ITEMS_FILE, items);
+    syncToSourceCode(items, settings);
 
     const orderId = `ORD-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`;
     const newOrder = {
@@ -392,7 +489,7 @@ async function startServer() {
       deliveryMethod: req.body.deliveryMethod || '在学校领取',
       shippingAddress: req.body.shippingAddress || '',
       note: req.body.note || '',
-      items: req.body.items || [], // array of { id, title, price, quantity, imageUrl }
+      items: orderItems,
       totalAmount: req.body.totalAmount || 0,
       sellerEmail: settings.sellerEmail || 'shiwokakanaka@gmail.com',
       emailPushed: true,
@@ -415,7 +512,7 @@ async function startServer() {
     res.status(201).json({
       success: true,
       order: newOrder,
-      message: `意向邮件信息已生成`
+      message: `意向邮件信息已生成，库存已自动锁定`
     });
   });
 
@@ -431,15 +528,45 @@ async function startServer() {
     res.json(orders[index]);
   });
 
-  // 3. Settings API
+  // 3. Settings API (Sanitizes password and SMTP secrets when called without owner authentication)
   app.get('/api/settings', (req: Request, res: Response) => {
     const settings = readJsonFile<any>(SETTINGS_FILE, DEFAULT_SETTINGS);
+    const authenticated = isOwnerAuthenticated(req);
+    if (!authenticated) {
+      const sanitized = { ...settings };
+      delete sanitized.adminPassword;
+      if (sanitized.smtpConfig) {
+        sanitized.smtpConfig = { ...sanitized.smtpConfig, pass: '' };
+      }
+      return res.json(sanitized);
+    }
     res.json(settings);
   });
 
   app.post('/api/settings', requireOwnerAuth, (req: Request, res: Response) => {
     const current = readJsonFile<any>(SETTINGS_FILE, DEFAULT_SETTINGS);
-    const updated = { ...current, ...req.body };
+    const body = req.body || {};
+
+    // Only update adminPassword if a non-empty string is provided
+    const updatedPassword = (typeof body.adminPassword === 'string' && body.adminPassword.trim().length > 0)
+      ? body.adminPassword.trim()
+      : current.adminPassword;
+
+    // Only update smtp pass if a non-empty string is provided
+    const updatedSmtpPass = (body.smtpConfig && typeof body.smtpConfig.pass === 'string' && body.smtpConfig.pass.trim().length > 0)
+      ? body.smtpConfig.pass.trim()
+      : current.smtpConfig?.pass;
+
+    const updated = {
+      ...current,
+      ...body,
+      adminPassword: updatedPassword,
+      smtpConfig: {
+        ...(current.smtpConfig || {}),
+        ...(body.smtpConfig || {}),
+        pass: updatedSmtpPass,
+      }
+    };
     writeJsonFile(SETTINGS_FILE, updated);
     const items = readJsonFile<any[]>(ITEMS_FILE, DEFAULT_ITEMS);
     syncToSourceCode(items, updated);
@@ -527,12 +654,23 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  // 6. Reset Data API
-  app.post('/api/data/reset', (req: Request, res: Response) => {
+  // 6. Reset Data API (Protected: strictly requires owner authentication and preserves owner credentials)
+  app.post('/api/data/reset', requireOwnerAuth, (req: Request, res: Response) => {
+    const currentSettings = readJsonFile<any>(SETTINGS_FILE, DEFAULT_SETTINGS);
     writeJsonFile(ITEMS_FILE, DEFAULT_ITEMS);
     writeJsonFile(ORDERS_FILE, []);
-    writeJsonFile(SETTINGS_FILE, DEFAULT_SETTINGS);
-    res.json({ success: true, message: '数据已恢复默认初始状态' });
+    // Preserve owner password and email so a reset can never be used as a backdoor to restore admin888
+    const preservedSettings = {
+      ...DEFAULT_SETTINGS,
+      sellerEmail: currentSettings.sellerEmail || DEFAULT_SETTINGS.sellerEmail,
+      adminPassword: currentSettings.adminPassword || DEFAULT_SETTINGS.adminPassword,
+      contactWeChat: currentSettings.contactWeChat || DEFAULT_SETTINGS.contactWeChat,
+      contactWeChatName: currentSettings.contactWeChatName || DEFAULT_SETTINGS.contactWeChatName,
+      contactWeChatQr: currentSettings.contactWeChatQr || DEFAULT_SETTINGS.contactWeChatQr,
+    };
+    writeJsonFile(SETTINGS_FILE, preservedSettings);
+    syncToSourceCode(DEFAULT_ITEMS, preservedSettings);
+    res.json({ success: true, message: '数据已安全重置清空，店主密码与身份已受保护保持不变' });
   });
 
   // Serve static assets from public directory
